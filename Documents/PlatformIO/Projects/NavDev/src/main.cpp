@@ -30,6 +30,8 @@
 #ifndef MQTT_MAX_PACKET_SIZE
 #define MQTT_MAX_PACKET_SIZE 240
 #endif
+
+
 /** End [defines] */
 
 // ==========================================================================
@@ -39,10 +41,8 @@
 // The Arduino library is needed for every Arduino program.
 #include <Arduino.h>
 
-#include<SoftwareSerial.h>
+//#include<SoftwareSerial.h>
 #include<Adafruit_GPS.h>
-#define GPSSerial Serial1
-Adafruit_GPS GPS(&GPSSerial);
 //import GPS library and assign serial port to GPS
 
 // EnableInterrupt is used by ModularSensors for external and pin change
@@ -60,13 +60,13 @@ Adafruit_GPS GPS(&GPSSerial);
 // ==========================================================================
 /** Start [logging_options] */
 // The name of this program file
-const char* sketchName = "logging_to_ThingSpeak.ino";
+const char* sketchName = "Logging To Thingspeak with GPS as calculated variable";
 // Logger ID, also becomes the prefix for the name of the data file on SD card
-const char* LoggerID = "DitchTest";
+const char* LoggerID = "Navigator0";
 // How frequently (in minutes) to log data
 const uint8_t loggingInterval = 1;
 // Your logger's timezone.
-const int8_t timeZone = -6;  // Eastern Standard Time
+const int8_t timeZone = -7;  // Mountain DLS time
 // NOTE:  Daylight savings time will not be applied!  Please use standard time!
 
 // Set the input and output pins for the logger
@@ -75,12 +75,13 @@ const long   serialBaud = 115200;  // Baud rate for debugging
 const int8_t greenLED   = 8;       // Pin for the green LED
 const int8_t redLED     = 9;       // Pin for the red LED
 const int8_t buttonPin  = 21;      // Pin for debugging mode (ie, button pin)
-const int8_t wakePin    = A7;      // MCU interrupt/alarm pin to wake from sleep
+const int8_t wakePin    = -1;      // MCU interrupt/alarm pin to wake from sleep A7
 // Set the wake pin to -1 if you do not want the main processor to sleep.
 // In a SAMD system where you are using the built-in rtc, set wakePin to 1
 const int8_t sdCardPwrPin   = -1;  // MCU SD card power pin
 const int8_t sdCardSSPin    = 12;  // SD card chip select/slave select pin
-const int8_t sensorPowerPin = 22;  // MCU pin controlling main sensor power
+const int8_t sensorPowerPin = -1;  // MCU pin controlling main sensor power
+const int8_t threeSw = 22;
 /** End [logging_options] */
 
 
@@ -107,7 +108,7 @@ const long modemBaud = 9600;  // All XBee's use 9600 by default
 // NOTE:  Use -1 for pins that do not apply
 // The pin numbers here are for a Digi XBee with a Mayfly and LTE adapter
 // For options https://github.com/EnviroDIY/LTEbee-Adapter/edit/master/README.md
-const int8_t modemVccPin = -1;     // MCU pin controlling modem power
+const int8_t modemVccPin = A5;     // MCU pin controlling modem power
                                    // Option: modemVccPin = A5, if Mayfly SJ7 is
                                    // connected to the ASSOC pin
 const int8_t modemStatusPin = 19;  // MCU pin used to read modem status
@@ -130,6 +131,21 @@ DigiXBeeCellularTransparent modemXBCT(&modemSerial, modemVccPin, modemStatusPin,
 DigiXBeeCellularTransparent modem = modemXBCT;
 /** End [xbee_cell_transparent] */
 
+// ==========================================================================
+//  Setting up the GPS
+// ==========================================================================
+#include <AltSoftSerial.h>
+AltSoftSerial altSoftSerial;
+//#define GPSSerial = altSoftSerial;
+AltSoftSerial &GPSSerial = altSoftSerial;
+// Connect to the GPS on the hardware port
+Adafruit_GPS GPS(&GPSSerial);
+
+// Set GPSECHO to 'false' to turn off echoing the GPS data to the Serial console
+// Set to 'true' if you want to debug and listen to the raw GPS sentences
+#define GPSECHO true
+
+//uint32_t timer = millis();
 // ==========================================================================
 //  Using the Processor as a Sensor
 // ==========================================================================
@@ -257,6 +273,34 @@ Variable* atlasSpCond =
                  atlasSpCondUnit, atlasSpCondCode, atlasSpCondUUID);
 /** End [atlas_ec] */
 
+// ==========================================================================
+//  Atlas Scientific EZO-DO Dissolved Oxygen Sensor
+// ==========================================================================
+/** Start [atlas_do] */
+#include <sensors/AtlasScientificDO.h>
+
+const int8_t AtlasDOPower    = sensorPowerPin;  // Power pin (-1 if unconnected)
+uint8_t      AtlasDOi2c_addr = 0x61;            // Default for DO is 0x61 (97)
+// All Atlas sensors have different default I2C addresses, but any of them can
+// be re-addressed to any 8 bit number.  If using the default address for any
+// Atlas Scientific sensor, you may omit this argument.
+
+// Create an Atlas Scientific DO sensor object
+#ifdef MS_ATLAS_SOFTWAREWIRE
+// AtlasScientificDO atlasDO(AtlasDOPower, softwareSDA, softwareSCL,
+//                           AtlasDOi2c_addr);
+AtlasScientificDO atlasDO(&softI2C, AtlasDOPower, AtlasDOi2c_addr);
+#else
+// AtlasScientificDO atlasDO(AtlasDOPower, AtlasDOi2c_addr);
+AtlasScientificDO atlasDO(AtlasDOPower);
+#endif
+
+// Create concentration and percent saturation variable pointers for the EZO-DO
+Variable* atlasDOconc = new AtlasScientificDO_DOmgL(
+    &atlasDO, "12345678-abcd-1234-ef00-1234567890ab");
+Variable* atlasDOpct = new AtlasScientificDO_DOpct(
+    &atlasDO, "12345678-abcd-1234-ef00-1234567890ab");
+/** End [atlas_do] */
 
 // ==========================================================================
 //  Atlas Scientific EZO-pH Sensor
@@ -285,7 +329,87 @@ Variable* atlaspHpH =
     new AtlasScientificpH_pH(&atlaspH, "12345678-abcd-1234-ef00-1234567890ab");
 /** End [atlas_ph] */
 
+// ==========================================================================
+//  Creating the Variables associated with GPS
+// ==========================================================================
+// Properties of the calculated variable
 
+float findLat(void){
+    float lat = GPS.latitudeDegrees;
+    return lat;
+}
+// Properties of the calculated variable
+// The number of digits after the decimal place
+const uint8_t gpsLatResolution = 5;
+// This must be a value from http://vocabulary.odm2.org/variablename/
+const char* gpsLatName = "latitude";
+// This must be a value from http://vocabulary.odm2.org/units/
+const char* gpsLatUnit = "degree";
+// A short code for the variable
+const char* gpslatCode = "adagpsLat";
+// The (optional) universallly unique identifier
+const char* gpslatUUID = "12345678-abcd-1234-ef00-1234567890ab";
+// Finally, Create the specific conductance variable and return a pointer to it
+Variable* gpsLat =
+    new Variable(findLat, gpsLatResolution, gpsLatName,
+                 gpsLatUnit, gpslatCode, gpslatUUID);
+
+float findLon(void){
+    float lon = (GPS.longitudeDegrees);
+    return lon;
+}
+// The number of digits after the decimal place
+const uint8_t gpsLonResolution = 5;
+// This must be a value from http://vocabulary.odm2.org/variablename/
+const char* gpsLonName = "longitude";
+// This must be a value from http://vocabulary.odm2.org/units/
+const char* gpsLonUnit = "degree";
+// A short code for the variable
+const char* gpslonCode = "adagpsLon";
+// The (optional) universallly unique identifier
+const char* gpslonUUID = "12345678-abcd-1234-ef00-1234567890ab";
+// Finally, Create the specific conductance variable and return a pointer to it
+Variable* gpsLon =
+    new Variable(findLon, gpsLonResolution, gpsLonName,
+                 gpsLonUnit, gpslonCode, gpslonUUID);
+
+float findAlt(void){
+    float alt = (GPS.altitude);
+    return alt;
+}
+// The number of digits after the decimal place
+const uint8_t gpsAltResolution = 5;
+// This must be a value from http://vocabulary.odm2.org/variablename/
+const char* gpsAltName = "altitude";
+// This must be a value from http://vocabulary.odm2.org/units/
+const char* gpsAltUnit = "meters";
+// A short code for the variable
+const char* gpsAltCode = "adagpsAlt";
+// The (optional) universallly unique identifier
+const char* gpsAltUUID = "12345678-abcd-1234-ef00-1234567890ab";
+// Finally, Create the specific conductance variable and return a pointer to it
+Variable* gpsAlt =
+    new Variable(findAlt, gpsAltResolution, gpsAltName,
+                 gpsAltUnit, gpsAltCode, gpsAltUUID);
+
+float findSpd(void){
+    float spdk = GPS.speed;
+    float spd = spdk/1.944;
+    return spd;
+}
+const uint8_t gpsSpdResolution = 5;
+// This must be a value from http://vocabulary.odm2.org/variablename/
+const char* gpsSpdName = "altitude";
+// This must be a value from http://vocabulary.odm2.org/units/
+const char* gpsSpdUnit = "metersPerSecond";
+// A short code for the variable
+const char* gpsSpdCode = "adaSpdAlt";
+// The (optional) universallly unique identifier
+const char* gpsSpdUUID = "12345678-abcd-1234-ef00-1234567890ab";
+// Finally, Create the specific conductance variable and return a pointer to it
+Variable* gpsSpd =
+    new Variable(findSpd, gpsSpdResolution, gpsSpdName,
+                 gpsSpdUnit, gpsSpdCode, gpsSpdUUID);
 // ==========================================================================
 //  Creating the Variable Array[s] and Filling with Variable Objects
 // ==========================================================================
@@ -298,16 +422,36 @@ Variable* variableList[] = {
     new AtlasScientificEC_SpecificGravity(&atlasEC, "12345678-abcd-1234-ef00-1234567890ab"),
     new AtlasScientificRTD_Temp(
     &atlasRTD, "12345678-abcd-1234-ef00-1234567890ab"),
-    new AtlasScientificpH_pH(&atlaspH, "12345678-abcd-1234-ef00-1234567890ab"),
+    new AtlasScientificpH_pH(
+    &atlaspH, "12345678-abcd-1234-ef00-1234567890ab"),
     new ProcessorStats_Battery(&mcuBoard,
                                "12345678-abcd-1234-ef00-1234567890ab"),
-    new MaximDS3231_Temp(&ds3231, "12345678-abcd-1234-ef00-1234567890ab"),
-    /*new Modem_RSSI(&modem, "12345678-abcd-1234-ef00-1234567890ab")*/};
+    new Modem_RSSI(&modem, "12345678-abcd-1234-ef00-1234567890ab")};
 // Count up the number of pointers in the array
 int variableCount = sizeof(variableList) / sizeof(variableList[0]);
 
+Variable* gpsVariableList[] = {
+    new Variable(findLat, gpsLatResolution, gpsLatName,
+                 gpsLatUnit, gpslatCode, gpslatUUID),
+    new Variable(findLon, gpsLonResolution, gpsLonName,
+                 gpsLonUnit, gpslonCode, gpslonUUID),
+    new Variable(findAlt, gpsAltResolution, gpsAltName,
+                gpsAltUnit, gpsAltUUID),
+    new Variable(findSpd, gpsSpdResolution, gpsSpdName,
+                gpsSpdUnit, gpsSpdUUID),
+    new AtlasScientificRTD_Temp(
+    &atlasRTD, "12345678-abcd-1234-ef00-1234567890ab"),
+    new AtlasScientificpH_pH(
+    &atlaspH, "12345678-abcd-1234-ef00-1234567890ab"),
+    new AtlasScientificEC_Cond(
+    &atlasEC, "12345678-abcd-1234-ef00-1234567890ab")
+};
+// Count up the number of pointers in the array
+int gpsVariableCount = sizeof(gpsVariableList) / sizeof(gpsVariableList[0]);
+
 // Create the VariableArray object
 VariableArray varArray;
+VariableArray gpsArray;
 /** End [variable_arrays] */
 
 
@@ -317,6 +461,7 @@ VariableArray varArray;
 /** Start [loggers] */
 // Create a logger instance
 Logger dataLogger;
+Logger gpsLogger;
 /** End [loggers] */
 
 
@@ -331,13 +476,18 @@ Logger dataLogger;
 const char* thingSpeakMQTTKey =
     "UCVQCOD6UMMXO3NU";  // Your MQTT API Key from Account > MyProfile.
 const char* thingSpeakChannelID =
-    "1283377";  // The numeric channel id for your channel
+    "1297931";  //1 -1322279// //0 -1297931 The numeric channel id for your channel
 const char* thingSpeakChannelKey =
-    "HQOF2B7CEEP3EU2B";  // The Write API Key for your channel
+    "YRW8XGM16X8MW7HO";  //1 -H2X1OR5G80U3O9C9//0 -YRW8XGM16X8MW7HO The Write API Key for your channel
+const char* thingSpeakChannelID1 =
+    "1445348";  //1GPS -1322280//0GPS -1283377 The numeric channel id for your channel
+const char* thingSpeakChannelKey1 =
+    "831PBD2M73873LQK";  //1GPS -Q21GGX5KDYCJPIKO// -HQOF2B7CEEP3EU2B The Write API Key for your channel
 
 // Create a data publisher for ThingSpeak
 #include <publishers/ThingSpeakPublisher.h>
 ThingSpeakPublisher TsMqtt;
+ThingSpeakPublisher TsMqtt1;
 /** End [loggers] */
 
 
@@ -350,7 +500,7 @@ void greenredflash(uint8_t numFlash = 4, uint8_t rate = 75) {
     for (uint8_t i = 0; i < numFlash; i++) {
         digitalWrite(greenLED, HIGH);
         digitalWrite(redLED, LOW);
-        delay(rate);
+        delay(rate); 
         digitalWrite(greenLED, LOW);
         digitalWrite(redLED, HIGH);
         delay(rate);
@@ -372,6 +522,7 @@ float getBatteryVoltage() {
 // ==========================================================================
 /** Start [setup] */
 void setup() {
+
     // Start the primary serial connection
     Serial.begin(serialBaud);
 
@@ -387,12 +538,13 @@ void setup() {
     Serial.print(F("TinyGSM Library version "));
     Serial.println(TINYGSM_VERSION);
     Serial.println();
+    
+    // power up GPS
+    pinMode(threeSw, OUTPUT);
+    digitalWrite(threeSw, HIGH);
 
     // Start the serial connection with the modem
     modemSerial.begin(modemBaud);
-
-    //Start the serial connection with the GPS module
-    GPSSerial.begin(9600);
     
     // Set up pins for the LED's
     pinMode(greenLED, OUTPUT);
@@ -402,28 +554,53 @@ void setup() {
     // Blink the LEDs to show the board is on and starting up
     greenredflash();
 
+    
     // Set the timezones for the logger/data and the RTC
     // Logging in the given time zone
     Logger::setLoggerTimeZone(timeZone);
     // It is STRONGLY RECOMMENDED that you set the RTC to be in UTC (UTC+0)
     Logger::setRTCTimeZone(0);
 
+      // 9600 NMEA is the default baud rate for Adafruit MTK GPS's- some use 4800
+    GPS.begin(9600);
+    // uncomment this line to turn on RMC (recommended minimum) and GGA (fix data) including altitude
+    GPS.sendCommand(PMTK_SET_NMEA_OUTPUT_RMCGGA);
+    // uncomment this line to turn on only the "minimum recommended" data
+    //GPS.sendCommand(PMTK_SET_NMEA_OUTPUT_RMCONLY);
+    // For parsing data, we don't suggest using anything but either RMC only or RMC+GGA since
+    // the parser doesn't care about other sentences at this time
+    // Set the update rate
+    GPS.sendCommand(PMTK_API_SET_FIX_CTL_100_MILLIHERTZ); // 100 millihertz update rate to conserve power
+    GPS.sendCommand(PMTK_SET_NMEA_UPDATE_200_MILLIHERTZ); // 200m mHz echo rate. needs to be slow enough to be parsed but occur frequently enough for navigator to read
+    // For the parsing code to work nicely and have time to sort thru the data, and
+    // print it out we don't suggest using anything higher than 1 Hz
+
+    // Request updates on antenna status, comment out to keep quiet
+    GPS.sendCommand(PGCMD_ANTENNA);
+
     // Attach the modem and information pins to the logger
     dataLogger.attachModem(modem);
+    gpsLogger.attachModem(modem);
     modem.setModemLED(modemLEDPin);
     dataLogger.setLoggerPins(wakePin, sdCardSSPin, sdCardPwrPin, buttonPin,
+                             greenLED);
+    gpsLogger.setLoggerPins(wakePin, sdCardSSPin, sdCardPwrPin, buttonPin,
                              greenLED);
 
     // Begin the variable array[s], logger[s], and publisher[s]
     varArray.begin(variableCount, variableList);
+    gpsArray.begin(gpsVariableCount, gpsVariableList);
     dataLogger.begin(LoggerID, loggingInterval, &varArray);
+    gpsLogger.begin(LoggerID, loggingInterval, &gpsArray);
     TsMqtt.begin(dataLogger, &modem.gsmClient, thingSpeakMQTTKey,
                  thingSpeakChannelID, thingSpeakChannelKey);
+    TsMqtt1.begin(gpsLogger, &modem.gsmClient, thingSpeakMQTTKey,
+                 thingSpeakChannelID1, thingSpeakChannelKey1);
 
     // Note:  Please change these battery voltages to match your battery
     // Set up the sensors, except at lowest battery level
     if (getBatteryVoltage() > 3.4) {
-        Serial.println(F("Setting up sensors..."));
+        //Serial.println(F("Setting up sensors..."));
         varArray.setupSensors();
     }
 
@@ -440,7 +617,7 @@ void setup() {
     // Writing to the SD card can be power intensive, so if we're skipping
     // the sensor setup we'll skip this too.
     if (getBatteryVoltage() > 3.4) {
-        Serial.println(F("Setting up file on SD card"));
+        //Serial.println(F("Setting up file on SD card"));
         dataLogger.turnOnSDcard(
             true);  // true = wait for card to settle after power up
         dataLogger.createLogFile(true);  // true = write a new header
@@ -449,7 +626,7 @@ void setup() {
     }
 
     // Call the processor sleep
-    Serial.println(F("Putting processor to sleep"));
+    //Serial.println(F("Putting processor to sleep"));
     dataLogger.systemSleep();
 }
 /** End [setup] */
@@ -461,16 +638,33 @@ void setup() {
 /** Start [loop] */
 // Use this short loop for simple data logging and sending
 void loop() {
+    //if (GPSSerial.available()) {
+        char c = GPS.read();
+    //}
+    if (GPSECHO)
+        if (c) Serial.print(c);
+    if (GPS.newNMEAreceived()) {
+    // a tricky thing here is if we print the NMEA sentence, or data
+    // we end up not listening and catching other sentences!
+    // so be very wary if using OUTPUT_ALLDATA and trying to print out data
+    //Serial.println(GPS.lastNMEA()); // this also sets the newNMEAreceived() flag to false
+    if (!GPS.parse(GPS.lastNMEA())) // this also sets the newNMEAreceived() flag to false
+      return; // we can fail to parse a sentence in which case we should just wait for another
+  }
+    
     // Note:  Please change these battery voltages to match your battery
     // At very low battery, just go back to sleep
-    if (getBatteryVoltage() < 3.4) {
+    if (getBatteryVoltage() < 2.4) {
         dataLogger.systemSleep();
     }
     else {
+        /*if (GPS.fix){
+        lat = GPS.latitudeDegrees;
+        }
+        */
         dataLogger.logDataAndPublish();
+        gpsLogger.logDataAndPublish();
     }
-    if (GPSSerial.available()) {
-        char c = GPSSerial.read();
-    }
+    
 }
 /** End [loop] */
